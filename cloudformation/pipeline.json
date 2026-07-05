@@ -1,0 +1,308 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Serverless data pipeline using existing S3 bucket and IAM role.",
+  "Parameters": {
+    "BucketName": {
+      "Type": "String",
+      "Default": "ap-southeast-2-bharath-data-projects"
+    },
+    "ExecutionRoleArn": {
+      "Type": "String",
+      "Default": "arn:aws:iam::YOUR_ACCOUNT_ID:role/ap-southeast-2-data-pipeline-role"
+    },
+    "LoadLambdaS3Key": {
+      "Type": "String",
+      "Default": "spotify-serverless-data/files/load-lambda.zip"
+    },
+    "TransformLambdaS3Key": {
+      "Type": "String",
+      "Default": "spotify-serverless-data/files/transform-lambda.zip"
+    },
+    "SpotifyClientId": {
+      "Type": "String",
+      "NoEcho": true
+    },
+    "SpotifyClientSecret": {
+      "Type": "String",
+      "NoEcho": true
+    },
+    "RAWPREFIX": {
+      "Type": "String",
+      "Default": "spotify-serverless-data/platform/raw/"
+    },
+    "PROCESSEDPREFIX": { 
+      "Type": "String",
+      "Default": "spotify-serverless-data/platform/processed/"
+    }
+  },
+  "Resources": {
+    "LoadLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": "spotify-load-lambda",
+        "Runtime": "python3.12",
+        "Handler": "src.main.handler",
+        "Role": {
+          "Ref": "ExecutionRoleArn"
+        },
+        "Timeout": 900,
+        "Environment": {
+          "Variables": {
+            "BUCKET": {
+              "Ref": "BucketName"
+            },
+            "RAWPREFIX": {
+              "Ref": "RAWPREFIX"
+            },
+            "SPOTIFY_CLIENT_ID": {
+              "Ref": "SpotifyClientId"
+            },
+            "SPOTIFY_CLIENT_SECRET": {
+              "Ref": "SpotifyClientSecret"
+            }
+          }
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "BucketName"
+          },
+          "S3Key": {
+            "Ref": "LoadLambdaS3Key"
+          }
+        }
+      }
+    },
+    "TransformLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": "spotify-transform-lambda",
+        "Runtime": "python3.12",
+        "Handler": "src.main.handler",
+        "Role": {
+          "Ref": "ExecutionRoleArn"
+        },
+        "Timeout": 900,
+        "Environment": {
+          "Variables": {
+            "BUCKET": {
+              "Ref": "BucketName"
+            },
+            "RAWPREFIX": {
+              "Ref": "RAWPREFIX"
+            },
+            "PROCESSEDPREFIX": {
+              "Ref": "PROCESSEDPREFIX"
+            }
+          }
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "BucketName"
+          },
+          "S3Key": {
+            "Ref": "TransformLambdaS3Key"
+          }
+        }
+      }
+    },
+    "PipelinePolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "spotify-data-pipeline-policy",
+        "Roles": [
+          "ap-southeast-2-data-pipeline-role"
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:aws:s3:::${BucketName}/*"
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:ListBucket"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:aws:s3:::${BucketName}"
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "glue:*"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "athena:*"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+      }
+    },
+    "ScheduleRule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "ScheduleExpression": "rate(1 day)",
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "LoadLambda",
+                "Arn"
+              ]
+            },
+            "Id": "LoadLambdaTarget"
+          }
+        ]
+      }
+    },
+    "PermissionForEvents": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Ref": "LoadLambda"
+        },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "ScheduleRule",
+            "Arn"
+          ]
+        }
+      }
+    },
+    "PermissionForS3": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Ref": "TransformLambda"
+        },
+        "Principal": "s3.amazonaws.com",
+        "SourceArn": {
+          "Fn::Sub": "arn:aws:s3:::${BucketName}"
+        }
+      }
+    },
+    "GlueDatabase": {
+      "Type": "AWS::Glue::Database",
+      "Properties": {
+        "CatalogId": {
+          "Ref": "AWS::AccountId"
+        },
+        "DatabaseInput": {
+          "Name": "spotify_data"
+        }
+      }
+    },
+    "GlueCrawlerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "glue.amazonaws.com"
+                ]
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+        ],
+        "Policies": [
+          {
+            "PolicyName": "crawler-s3",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:ListBucket"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:s3:::${BucketName}"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:s3:::${BucketName}/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "GlueCrawler": {
+      "Type": "AWS::Glue::Crawler",
+      "Properties": {
+        "Name": "spotify-serverless-crawler",
+        "Role": {
+          "Fn::GetAtt": [
+            "GlueCrawlerRole",
+            "Arn"
+          ]
+        },
+        "DatabaseName": {
+          "Ref": "GlueDatabase"
+        },
+        "Targets": {
+          "S3Targets": [
+            {
+              "Path": {
+                "Fn::Sub": "s3://${BucketName}/processed/"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "AthenaWorkGroup": {
+      "Type": "AWS::Athena::WorkGroup",
+      "Properties": {
+        "Name": "spotify-serverless-workgroup",
+        "WorkGroupConfiguration": {
+          "ResultConfiguration": {
+            "OutputLocation": {
+              "Fn::Sub": "s3://${BucketName}/athena-results/"
+            }
+          }
+        }
+      }
+    }
+  }
+}
